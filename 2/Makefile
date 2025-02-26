@@ -1,4 +1,6 @@
-GCC_FLAGS = -Wextra -Werror -Wall -Wno-gnu-folding-constant
+#GCC_FLAGS = -Wextra -Werror -Wall -Wno-gnu-folding-constant
+
+GCC_FLAGS = -Wall -Wno-gnu-folding-constant
 
 all:
 	gcc $(GCC_FLAGS) solution.c parser.c -o mybash

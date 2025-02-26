@@ -49,7 +49,7 @@ static void execute_command(const struct command *cmd, const struct command_line
 
     char *exec_args[cmd->arg_count + 2];
     exec_args[0] = cmd->exe;
-    for (int i = 0; i < cmd->arg_count; i++) {
+    for (uint32_t i = 0; i < cmd->arg_count; i++) {
         exec_args[i + 1] = cmd->args[i];
     }
     exec_args[cmd->arg_count + 1] = NULL;

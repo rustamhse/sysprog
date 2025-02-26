@@ -88,7 +88,7 @@ static void execute_pipeline(const struct command_line *line) {
             }
             
             pid = fork();
-            if (pid == 0) { // Дочерний процесс
+            if (pid == 0) {
                 if (prev_fd != -1) {
                     dup2(prev_fd, STDIN_FILENO);
                     close(prev_fd);

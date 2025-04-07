@@ -178,15 +178,13 @@ static void *worker_thread_func(void *arg) {
 }
 
 
-
-
 int 
 thread_pool_push_task(struct thread_pool *pool, struct thread_task *task) {
     if (!pool || !task) return -1;
 
     pthread_mutex_lock(&pool->mutex);
 
-    if (pool->queue_size >= MAX_QUEUE_SIZE) {
+    if (pool->queue_size + pool->running_tasks_count >= MAX_QUEUE_SIZE) {
         pthread_mutex_unlock(&pool->mutex);
         return TPOOL_ERR_TOO_MANY_TASKS;
     }
@@ -204,7 +202,6 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task) {
 
     if (pool->active_threads < pool->max_threads && pool->idle_threads == 0) {
         if (pthread_create(&pool->threads[pool->active_threads], NULL, worker_thread_func, pool) != 0) {
-            // откат очереди
             pool->queue_back = (pool->queue_back - 1 + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE;
             pool->queue_size--;
             task->is_pushed = false;
@@ -218,7 +215,6 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task) {
     pthread_mutex_unlock(&pool->mutex);
     return 0;
 }
-
 
 
 int 

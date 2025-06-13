@@ -1,150 +1,189 @@
 #include "parser.h"
-#include <stdio.h>
+
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <fcntl.h>
+#include <assert.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
 
-static void execute_command(const struct command *cmd, const struct command_line *line) {
-    if (strcmp(cmd->exe, "cd") == 0) {
-        if (cmd->arg_count < 1) {
-            fprintf(stderr, "cd: missing argument\n");
-        } else {
-            if (chdir(cmd->args[0]) != 0) {
-                perror("cd");
-            }
-        }
-        return;
-    }
+struct exec_result {
+    int need_exit;
+    int return_code;
+    pid_t *bg_pids;
+    size_t bg_count;
+};
 
-    if (strcmp(cmd->exe, "exit") == 0) {
-        exit(0);
-    }
-
-    int fd;
-    if (line->out_type == OUTPUT_TYPE_FILE_NEW) {
-        fd = open(line->out_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd == -1) {
-            perror("open");
-            exit(EXIT_FAILURE);
-        }
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-    } else if (line->out_type == OUTPUT_TYPE_FILE_APPEND) {
-        fd = open(line->out_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd == -1) {
-            perror("open");
-            exit(EXIT_FAILURE);
-        }
-        dup2(fd, STDOUT_FILENO);
-        close(fd);
-    }
-
-    if (!cmd->exe || strlen(cmd->exe) == 0) {
-        fprintf(stderr, "Error: empty command\n");
-        return;
-    }
-
-    char *exec_args[cmd->arg_count + 2];
-    exec_args[0] = cmd->exe;
-    for (uint32_t i = 0; i < cmd->arg_count; i++) {
-        exec_args[i + 1] = cmd->args[i];
-    }
-    exec_args[cmd->arg_count + 1] = NULL;
-
-    if (execvp(exec_args[0], exec_args) == -1) {
-        perror("execvp");
-        exit(EXIT_FAILURE);
-    }
+static struct exec_result make_result(int need_exit, int return_code, pid_t *bg_pids, size_t bg_count) {
+    struct exec_result res = {need_exit, return_code, bg_pids, bg_count};
+    return res;
 }
 
-static void execute_pipeline(const struct command_line *line) {
-    int prev_fd = -1;
-    int pipefd[2];
-    pid_t pid;
-    int last_status = 0;
-    enum expr_type prev_type = EXPR_TYPE_COMMAND;
+static int handle_cd_command(const struct expr *expr) {
+    assert(expr);
+    if (expr->cmd.arg_count != 1) return 1;
+    return chdir(expr->cmd.args[0]);
+}
 
-    for (const struct expr *e = line->head; e; e = e->next) {
+static void execute_cmd(const struct expr *expr) {
+    assert(expr);
+    char **args = calloc(expr->cmd.arg_count + 2, sizeof(char *));
+    args[0] = expr->cmd.exe;
+    memcpy(args + 1, expr->cmd.args, sizeof(char *) * expr->cmd.arg_count);
+    execvp(expr->cmd.exe, args);
+}
 
-        if (prev_type == EXPR_TYPE_AND && last_status != 0) {
-            prev_type = e->type;
-            continue;
+static int is_logical(const struct expr *e) {
+    return e->type == EXPR_TYPE_AND || e->type == EXPR_TYPE_OR;
+}
+
+static int is_last_in_pipeline(const struct expr *e) {
+    return e->next == NULL || is_logical(e->next);
+}
+
+static struct exec_result execute_pipeline(struct expr *start, const char *outfile, enum output_type outtype, int wait_children) {
+    struct pid_array pids;
+    if (pid_array_init(&pids) != 0) return make_result(0, 1, NULL, 0);
+
+    int pipefds[3] = {STDIN_FILENO, STDOUT_FILENO, -1};
+    struct expr *e = start;
+
+    while (e && !is_logical(e)) {
+        if (e->type != EXPR_TYPE_COMMAND) { e = e->next; continue; }
+
+        if (!is_last_in_pipeline(e)) {
+            if (pipe(pipefds + 1) != 0) return make_result(0, 1, NULL, 0);
+            int tmp = pipefds[1]; pipefds[1] = pipefds[2]; pipefds[2] = tmp;
         }
 
-        if (prev_type == EXPR_TYPE_OR && last_status == 0) {
-            prev_type = e->type;
-            continue;
-        }
-
-        if (e->type == EXPR_TYPE_COMMAND) {
-            if (e->next && e->next->type == EXPR_TYPE_PIPE) {
-                if (pipe(pipefd) == -1) {
-                    perror("pipe");
-                    exit(EXIT_FAILURE);
-                }
+        if (strcmp(e->cmd.exe, "cd") == 0 && pids.pa_size == 0 && is_last_in_pipeline(e)) {
+            if (handle_cd_command(e) != 0) {
+                pid_array_free(&pids);
+                if (pipefds[0] != STDIN_FILENO) close(pipefds[0]);
+                if (pipefds[1] != STDOUT_FILENO) close(pipefds[1]);
+                return make_result(0, -1, NULL, 0);
             }
-            
-            pid = fork();
+        } else if (strcmp(e->cmd.exe, "exit") == 0) {
+            if (e->next == NULL || is_logical(e->next)) {
+                int is_one_cmd = (pids.pa_size == 0);
+                pid_array_wait_and_free(&pids);
+                if (pipefds[0] != STDIN_FILENO) close(pipefds[0]);
+                if (pipefds[1] != STDOUT_FILENO) close(pipefds[1]);
+                if (e->cmd.arg_count != 0) {
+                    int code = atoi(e->cmd.args[0]);
+                    return make_result(is_one_cmd, code, NULL, 0);
+                }
+                return make_result(is_one_cmd, 0, NULL, 0);
+            }
+        } else {
+            pid_t pid = fork();
+            if (pid == -1) {
+                pid_array_wait_and_free(&pids);
+                return make_result(1, 1, NULL, 0);
+            }
             if (pid == 0) {
-                if (prev_fd != -1) {
-                    dup2(prev_fd, STDIN_FILENO);
-                    close(prev_fd);
-                }
-                if (e->next && e->next->type == EXPR_TYPE_PIPE) {
-                    close(pipefd[0]);
-                    dup2(pipefd[1], STDOUT_FILENO);
-                    close(pipefd[1]);
-                }
-                execute_command(&e->cmd, line);
-            } else if (pid < 0) {
-                perror("fork");
-                exit(EXIT_FAILURE);
-            }
+                pid_array_free(&pids);
+                if (wait_children || pids.pa_size > 0) {
+                    if (dup2(pipefds[0], STDIN_FILENO) != STDIN_FILENO) exit(1);
+                } else close(pipefds[0]);
 
-            if (prev_fd != -1) {
-                close(prev_fd);
-            }
-            if (e->next && e->next->type == EXPR_TYPE_PIPE) {
-                close(pipefd[1]);
-                prev_fd = pipefd[0];
-            }
+                int outfd = pipefds[1];
+                if (is_last_in_pipeline(e)) {
+                    if (outfd != STDOUT_FILENO) close(outfd);
+                    if (outtype != OUTPUT_TYPE_STDOUT) {
+                        outfd = open(outfile, O_CREAT | O_WRONLY | (outtype == OUTPUT_TYPE_FILE_NEW ? O_TRUNC : O_APPEND), 0666);
+                        if (outfd == -1) exit(1);
+                    } else outfd = STDOUT_FILENO;
+                }
 
-            int status;
-            waitpid(pid, &status, 0);
-            if (WIFEXITED(status)) {
-                last_status = WEXITSTATUS(status);
+                if (dup2(outfd, STDOUT_FILENO) != STDOUT_FILENO) exit(1);
+                if (pipefds[2] != -1) close(pipefds[2]);
+                execute_cmd(e);
+                exit(1);
             }
+            pid_array_push(&pids, pid);
         }
 
-        prev_type = e->type;
+        if (pipefds[0] != STDIN_FILENO) close(pipefds[0]);
+        if (pipefds[1] != STDOUT_FILENO) close(pipefds[1]);
+        pipefds[0] = pipefds[2];
+        e = e->next;
     }
+
+    if (pipefds[0] != STDIN_FILENO) close(pipefds[0]);
+
+    if (wait_children) return make_result(0, pid_array_wait_and_free(&pids), NULL, 0);
+    return make_result(0, 0, pids.pa_children, pids.pa_size);
+}
+
+static struct exec_result execute_command_line(const struct command_line *line) {
+    struct expr *iter = line->head;
+    struct expr *start = iter;
+    while (iter && !is_logical(iter)) iter = iter->next;
+
+    int last = (iter == NULL);
+    struct exec_result result = execute_pipeline(start, last ? line->out_file : NULL, last ? line->out_type : OUTPUT_TYPE_STDOUT, last ? !line->is_background : 1);
+    if (result.need_exit) return result;
+
+    while (iter) {
+        enum expr_type op = iter->type;
+        iter = iter->next;
+
+        if ((op == EXPR_TYPE_AND && result.return_code == 0) || (op == EXPR_TYPE_OR && result.return_code != 0)) {
+            start = iter;
+            while (iter && !is_logical(iter)) iter = iter->next;
+            last = (iter == NULL);
+            result = execute_pipeline(start, last ? line->out_file : NULL, last ? line->out_type : OUTPUT_TYPE_STDOUT, last ? !line->is_background : 1);
+            if (result.need_exit) return result;
+        }
+    }
+    return result;
 }
 
 int main(void) {
-    setbuf(stdout, NULL);
-    const size_t buf_size = 1024;
-    char buf[buf_size];
-    int rc;
+    const size_t BUF_SIZE = 1024;
+    char buf[BUF_SIZE];
+    ssize_t rc;
     struct parser *p = parser_new();
-    
-    while ((rc = read(STDIN_FILENO, buf, buf_size)) > 0) {
-        parser_feed(p, buf, rc);
-        struct command_line *line = NULL;
-        while (true) {
-            enum parser_error err = parser_pop_next(p, &line);
-            if (err == PARSER_ERR_NONE && line == NULL)
-                break;
-            if (err != PARSER_ERR_NONE) {
-                fprintf(stderr, "Error: %d\n", err);
-                continue;
-            }
-            execute_pipeline(line);
-            command_line_delete(line);
-        }
+    int last_retcode = 0;
+
+    struct pid_array bg_proc;
+    if (pid_array_init(&bg_proc) != 0) {
+        parser_delete(p);
+        return 1;
     }
+
+    while (1) {
+        rc = read(STDIN_FILENO, buf, BUF_SIZE);
+        if (rc == 0) break;
+        if (rc < 0) {
+            perror("read");
+            break;
+        }
+        parser_feed(p, buf, rc);
+
+        struct command_line *line = NULL;
+        while (parser_pop_next(p, &line) == PARSER_ERR_NONE && line != NULL) {
+            struct exec_result res = execute_command_line(line);
+            last_retcode = res.return_code;
+            command_line_delete(line);
+
+            if (res.bg_pids) {
+                for (size_t i = 0; i < res.bg_count; i++)
+                    pid_array_push(&bg_proc, res.bg_pids[i]);
+                free(res.bg_pids);
+            }
+            if (res.need_exit) {
+                pid_array_wait_and_free(&bg_proc);
+                parser_delete(p);
+                return res.return_code;
+            }
+        }
+        pid_array_wait_nonblock(&bg_proc);
+    }
+
+    pid_array_wait_and_free(&bg_proc);
     parser_delete(p);
-    return 0;
+    return last_retcode;
 }
+

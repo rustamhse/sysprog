@@ -59,8 +59,6 @@ static enum ufs_error_code resize_fds() {
     int new_cap = fds_capacity;
     if (fds_count == fds_capacity)
         new_cap *= FD_GROWTH;
-    else if (fds_count * FD_GROWTH < fds_capacity && fds_capacity > FD_INIT_CAP)
-        new_cap /= FD_GROWTH;
 
     if (new_cap == fds_capacity)
         return UFS_ERR_NO_ERR;

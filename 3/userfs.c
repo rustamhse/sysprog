@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 #define FD_INIT_CAP 10
 #define FD_GROWTH 2
@@ -37,11 +38,14 @@ struct filedesc {
     int block_num;
     int offset_in_block;
     enum open_flags flags;
+    struct filedesc *next_free;
 };
 
 static struct filedesc **fds = NULL;
 static int fds_count = 0;
 static int fds_capacity = 0;
+
+static struct filedesc *fd_pool = NULL;
 
 enum ufs_error_code ufs_errno() {
     return ufs_error_code;
@@ -55,17 +59,19 @@ static enum ufs_error_code init_fds() {
     return UFS_ERR_NO_ERR;
 }
 
-static enum ufs_error_code resize_fds() {
-    int new_cap = fds_capacity;
-    if (fds_count == fds_capacity)
-        new_cap *= FD_GROWTH;
-
-    if (new_cap == fds_capacity)
+static enum ufs_error_code
+resize_fds(void)
+{
+    if (fds_count < fds_capacity)
         return UFS_ERR_NO_ERR;
 
-    struct filedesc **tmp = realloc(fds, sizeof(struct filedesc *) * new_cap);
-    if (!tmp) return UFS_ERR_NO_MEM;
-    memset(tmp + fds_count, 0, sizeof(struct filedesc *) * (new_cap - fds_count));
+    int new_cap = fds_capacity * FD_GROWTH;
+    struct filedesc **tmp = calloc(new_cap, sizeof(*tmp));
+    if (tmp == NULL)
+        return UFS_ERR_NO_MEM;
+
+    memcpy(tmp, fds, sizeof(*fds) * fds_capacity);
+    free(fds);
     fds = tmp;
     fds_capacity = new_cap;
     return UFS_ERR_NO_ERR;
@@ -122,20 +128,38 @@ static struct file *find_file(const char *name) {
     return NULL;
 }
 
-static struct filedesc *alloc_fd(struct file *f, enum open_flags flags) {
-    struct filedesc *desc = calloc(1, sizeof(struct filedesc));
-    if (!desc) return NULL;
+static struct filedesc *
+alloc_fd(struct file *f, enum open_flags flags)
+{
+    struct filedesc *desc;
+    if (fd_pool) {
+        desc = fd_pool;
+        fd_pool = fd_pool->next_free;
+        memset(desc, 0, sizeof(*desc));
+    } else {
+        desc = calloc(1, sizeof(struct filedesc));
+        if (!desc)
+            return NULL;
+    }
     desc->file = f;
     desc->flags = flags;
     return desc;
 }
 
-static int next_fd_index() {
-    if (!fds) return -1;
-    for (int i = 0; i < fds_capacity; i++)
-        if (!fds[i]) return i;
-    if (resize_fds() != UFS_ERR_NO_ERR) return -1;
-    return fds_capacity / FD_GROWTH;
+static int
+next_fd_index(void)
+{
+    if (!fds)
+        return -1;
+
+    while (true) {
+        for (int i = 0; i < fds_capacity; ++i) {
+            if (fds[i] == NULL)
+                return i;
+        }
+        if (resize_fds() != UFS_ERR_NO_ERR)
+            return -1;
+    }
 }
 
 static struct filedesc *get_fd(int fd) {
@@ -236,7 +260,8 @@ int ufs_close(int fd) {
     --f->refs;
     if (f->deleted && f->refs == 0)
         remove_file(f);
-    free(desc);
+        desc->next_free = fd_pool;
+    fd_pool = desc;
     fds[fd] = NULL;
     if (fds_count - 1 == fd)
         while (fds_count > 0 && !fds[fds_count - 1]) --fds_count;
@@ -308,4 +333,10 @@ void ufs_destroy(void) {
     fds = NULL;
     while (files_head)
         remove_file(files_head);
+
+    while (fd_pool) {
+        struct filedesc *next = fd_pool->next_free;
+        free(fd_pool);
+        fd_pool = next;
+    }
 }

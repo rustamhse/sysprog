@@ -9,15 +9,13 @@
 #include <stdbool.h>
 #include <errno.h>
 
-/* Глобальная переменная для хранения кода возврата последней выполненной команды */
 static int shell_last_exit_status = 0;
 
-/* Глобальный массив для фоновых процессов */
 static struct pid_array bg_children;
 static bool bg_initialized = false;
 
 static void execute_command(const struct command *cmd, const struct command_line *line) {
-    (void)line; /* параметр пока не используется после переноса redirection */
+    (void)line;
     if (strcmp(cmd->exe, "cd") == 0) {
         if (cmd->arg_count < 1) {
             fprintf(stderr, "cd: missing argument\n");
@@ -36,7 +34,6 @@ static void execute_command(const struct command *cmd, const struct command_line
         exit(code);
     }
 
-    /* Если это mkfifo, добавляем небольшую задержку после создания */
     if (strcmp(cmd->exe, "mkfifo") == 0) {
         int fd;
         (void)fd;
@@ -57,12 +54,12 @@ static void execute_command(const struct command *cmd, const struct command_line
             perror("execvp");
             exit(EXIT_FAILURE);
         }
-        usleep(100000); /* 100ms задержка */
+        usleep(100000);
         return;
     }
 
     int fd;
-    (void)fd; /* переменная может быть неиспользуемой, но оставим для единообразия */
+    (void)fd;
 
     if (!cmd->exe || strlen(cmd->exe) == 0) {
         fprintf(stderr, "Error: empty command\n");

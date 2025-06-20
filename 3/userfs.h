@@ -1,173 +1,176 @@
 #pragma once
 
-#include <sys/types.h>
+#include <stdbool.h>
 
 /**
- * User-defined in-memory filesystem. It is as simple as possible.
- * Each file lies in the memory as an array of blocks. A file
- * has an unique file name, and there are no directories, so the
- * FS is a monolithic flat contiguous folder.
+ * Here you should specify which features do you want to implement via macros:
+ * NEED_DETACH and NEED_TIMED_JOIN. If you want to enable detach, do:
+ *
+ *     #define NEED_DETACH 1
+ *
+ * To enable timed join do:
+ *
+ *     #define NEED_TIMED_JOIN 1
+ *
+ * It is important to define these macros here, in the header, because it is
+ * used by tests.
  */
+#define NEED_DETACH 1
+#define NEED_TIMED_JOIN 1
 
-/**
- * Here you should specify which features do you want to implement
- * via macros: NEED_OPEN_FLAGS and NEED_RESIZE. If you want to
- * allow advanced flags, do this here:
- *
- *     #define NEED_OPEN_FLAGS 1
- *
- * To allow resize() functions define this:
- *
- *     #define NEED_RESIZE 1
- *
- * It is important to define these macros here, in the header,
- * because it is used by tests.
- */
-#define NEED_OPEN_FLAGS 1
-#define NEED_RESIZE 1
+struct thread_pool;
+struct thread_task;
 
-/**
- * Flags for ufs_open call.
- */
-enum open_flags {
-	/**
-	 * If the flag specified and a file does not exist -
-	 * create it.
-	 */
-	UFS_CREATE = 1,
+typedef void *(*thread_task_f)(void *);
 
-#if NEED_OPEN_FLAGS
-
-	/**
-	 * With this flag it is allowed to only read the file.
-	 */
-	UFS_READ_ONLY = 2,
-	/**
-	 * With this flag it is allowed to only write into the
-	 * file.
-	 */
-	UFS_WRITE_ONLY = 4,
-	/**
-	 * With this flag it is allowed to both read and write
-	 * into the file.
-	 */
-	UFS_READ_WRITE = 8,
-
-#endif
+enum {
+	TPOOL_MAX_THREADS = 20,
+	TPOOL_MAX_TASKS = 100000,
 };
 
-/** Possible errors from all functions. */
-enum ufs_error_code {
-	UFS_ERR_NO_ERR = 0,
-	UFS_ERR_NO_FILE,
-	UFS_ERR_NO_MEM,
-	UFS_ERR_NOT_IMPLEMENTED,
-
-#if NEED_OPEN_FLAGS
-
-	UFS_ERR_NO_PERMISSION,
-#endif
+enum thread_poool_errcode {
+	TPOOL_ERR_INVALID_ARGUMENT = 1,
+	TPOOL_ERR_TOO_MANY_TASKS,
+	TPOOL_ERR_HAS_TASKS,
+	TPOOL_ERR_TASK_NOT_PUSHED,
+	TPOOL_ERR_TASK_IN_POOL,
+	TPOOL_ERR_NOT_IMPLEMENTED,
+	TPOOL_ERR_TIMEOUT,
 };
 
-/** Get code of the last error. */
-enum ufs_error_code
-ufs_errno();
+/** Thread pool API. */
 
 /**
- * Open a file by filename.
- * @param filename Name of a file to open.
- * @param flags Bitwise combination of open_flags.
+ * Create a new thread pool with maximum @a max_thread_count
+ * threads.
+ * @param max_thread_count Maximum pool size.
+ * @param[out] Pointer to store result pool object.
  *
- * @retval > 0 File descriptor.
- * @retval -1 Error occurred. Check ufs_errno() for a code.
- *     - UFS_ERR_NO_FILE - no such file, and UFS_CREATE flag is
- *       not specified.
- */
-int
-ufs_open(const char *filename, int flags);
-
-/**
- * Write data to the file.
- * @param fd File descriptor from ufs_open().
- * @param buf Buffer to write.
- * @param size Size of @a buf.
- *
- * @retval > 0 How many bytes were written.
- * @retval -1 Error occurred. Check ufs_errno() for a code.
- *     - UFS_ERR_NO_FILE - invalid file descriptor.
- *     - UFS_ERR_NO_MEM - not enough memory.
- */
-ssize_t
-ufs_write(int fd, const char *buf, size_t size);
-
-/**
- * Read data from the file.
- * @param fd File descriptor from ufs_open().
- * @param buf Buffer to read into.
- * @param size Maximum bytes to read.
- *
- * @retval > 0 How many bytes were read.
- * @retval 0 EOF.
- * @retval -1 Error occurred. Check ufs_errno() for a code.
- *     - UFS_ERR_NO_FILE - invalid file descriptor.
- */
-ssize_t
-ufs_read(int fd, char *buf, size_t size);
-
-/**
- * Close a file.
- * @param fd File descriptor from ufs_open().
  * @retval 0 Success.
- * @retval -1 Error occurred. Check ufs_errno() for a code.
- *     - UFS_ERR_NO_FILE - invalid file descriptor.
+ * @retval != 0 Error code.
+ *     - TPOOL_ERR_INVALID_ARGUMENT - max_thread_count is too big,
+ *       or 0.
  */
 int
-ufs_close(int fd);
+thread_pool_new(int max_thread_count, struct thread_pool **pool);
 
 /**
- * Delete a file by its name. Note, that it is allowed to drop the
- * file even if there are opened descriptors. In such a case the
- * file content will live until the last descriptor is closed. If
- * the file is deleted, it is allowed to create a new one with the
- * same name immediately and it should not affect existing opened
- * descriptors of the deleted file.
- *
- * @param filename Name of a file to delete.
- * @retval -1 Error occurred. Check ufs_errno() for a code.
- *     - UFS_ERR_NO_FILE - no such file.
+ * How many threads are created by this pool. Can be less than
+ * max.
+ * @param pool Thread pool to get thread count of.
+ * @retval Thread count.
  */
 int
-ufs_delete(const char *filename);
-
-#if NEED_RESIZE
+thread_pool_thread_count(const struct thread_pool *pool);
 
 /**
- * Resize a file opened by the file descriptor @a fd. If current
- * file size is less than @a new_size, then new empty blocks are
- * created and positions of opened file descriptors are not
- * changed. If the current size is bigger than @a new_size, then
- * the blocks are truncated. Opened file descriptors behind the
- * new file size should proceed from the new file end.
- *
- * @param fd File descriptor from ufs_open().
- * @param new_size New file size.
+ * Delete @a pool, free its memory.
+ * @param pool Pool to delete.
  * @retval 0 Success.
- * @retval -1 Error occurred.
- *     - UFS_ERR_NO_FILE - invalid file descriptor.
- *     - UFS_ERR_NO_PERMISSION - descriptor should have been opened with
- *       UFS_WRITE_ONLY or UFS_READ_WRITE permissions.
- *     - UFS_ERR_NO_MEM - not enough memory. Can appear only when
- *       @a new_size is bigger than the current size.
+ * @retval != Error code.
+ *     - TPOOL_ERR_HAS_TASKS - pool still has tasks.
  */
 int
-ufs_resize(int fd, size_t new_size);
+thread_pool_delete(struct thread_pool *pool);
+
+/**
+ * Push @a task into thread pool queue.
+ * @param pool Pool to push into.
+ * @param task Task to push.
+ *
+ * @retval 0 Success.
+ * @retval != Error code.
+ *     - TPOOL_ERR_TOO_MANY_TASKS - pool has too many tasks
+ *       already.
+ */
+int
+thread_pool_push_task(struct thread_pool *pool, struct thread_task *task);
+
+/** Thread pool task API. */
+
+/**
+ * Create a new task to push it into a pool.
+ * @param[out] task Pointer to store result task object.
+ * @param function Function to run by this task.
+ * @param arg Argument for @a function.
+ *
+ * @retval Always 0.
+ */
+int
+thread_task_new(struct thread_task **task, thread_task_f function, void *arg);
+
+/**
+ * Check if @a task is finished and its result can be obtained.
+ * @param task Task to check.
+ */
+bool
+thread_task_is_finished(const struct thread_task *task);
+
+/**
+ * Check if @a task is running right now.
+ * @param task Task to check.
+ */
+bool
+thread_task_is_running(const struct thread_task *task);
+
+/**
+ * Join the task. If it is not finished, then wait until it is.
+ * Note, this function does not delete task object. It can be
+ * reused for a next task or deleted via thread_task_delete.
+ * @param task Task to join.
+ * @param[out] result Pointer to stored result of @a task.
+ *
+ * @retval 0 Success.
+ * @retval != 0 Error code.
+ *     - TPOOL_ERR_TASK_NOT_PUSHED - task is not pushed to a pool.
+ */
+int
+thread_task_join(struct thread_task *task, void **result);
+
+#if NEED_TIMED_JOIN
+
+/**
+ * Like thread_task_join() but wait no longer than the timeout.
+ * @param task Task to join.
+ * @param timeout Timeout in seconds. 0 means no waiting at all. For an infinite
+ *   timeout pass infinity or DBL_MAX or just something huge.
+ * @param[out] result Pointer to stored result of @a task.
+ *
+ * @retval 0 Success.
+ * @retval != 0 Error code.
+ *     - TPOOL_ERR_TASK_NOT_PUSHED - task is not pushed to a pool.
+ *     - TPOOL_ERR_TIMEOUT - join timed out, nothing is done.
+ */
+int
+thread_task_timed_join(struct thread_task *task, double timeout, void **result);
 
 #endif
 
 /**
- * Destroy all the global variables, free all the memory, close and delete all
- * the files. After the destruction neither of the ufs functions are supposed to
- * be used. Purpose of the destruction is to reclaim all the dynamic memory.
+ * Delete a task, free its memory.
+ * @param task Task to delete.
+ *
+ * @retval 0 Success.
+ * @retval != Error code.
+ *     - TPOOL_ERR_TASK_IN_POOL - can not drop the task. It still
+ *       is in a pool. Need to join it firstly.
  */
-void
-ufs_destroy(void);
+int
+thread_task_delete(struct thread_task *task);
+
+#if NEED_DETACH
+
+/**
+ * Detach a task so as to auto-delete it when it is finished.
+ * After detach a task can not be accessed via any functions.
+ * If it is already finished, then just delete it.
+ * @param task Task to detach.
+ * @retval 0 Success.
+ * @retval != Error code.
+ *     - TPOOL_ERR_TASK_NOT_PUSHED - task is not pushed to a
+ *       pool.
+*/
+int
+thread_task_detach(struct thread_task *task);
+
+#endif

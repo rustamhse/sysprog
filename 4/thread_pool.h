@@ -33,6 +33,7 @@ enum thread_poool_errcode {
   TPOOL_ERR_TOO_MANY_TASKS,
   TPOOL_ERR_HAS_TASKS,
   TPOOL_ERR_TASK_NOT_PUSHED,
+  TPOOL_ERR_TASK_NOT_JOINED,
   TPOOL_ERR_TASK_IN_POOL,
   TPOOL_ERR_NOT_IMPLEMENTED,
   TPOOL_ERR_TIMEOUT,
@@ -144,7 +145,7 @@ int thread_task_timed_join(struct thread_task *task, double timeout,
  * @param task Task to delete.
  *
  * @retval 0 Success.
- * @retval != Error code.
+ * @retval != 0 Error code.
  *     - TPOOL_ERR_TASK_IN_POOL - can not drop the task. It still
  *       is in a pool. Need to join it firstly.
  */

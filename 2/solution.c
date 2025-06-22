@@ -8,11 +8,13 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
-
-static int shell_last_exit_status = 0;
+#include <assert.h>
+#include <signal.h>
+#include <sys/stat.h>
 
 static struct pid_array bg_children;
 static bool bg_initialized = false;
+static int shell_last_exit_status = 0;
 
 static void execute_command(const struct command *cmd, const struct command_line *line) {
     (void)line;
@@ -33,33 +35,6 @@ static void execute_command(const struct command *cmd, const struct command_line
             code = atoi(cmd->args[0]);
         exit(code);
     }
-
-    if (strcmp(cmd->exe, "mkfifo") == 0) {
-        int fd;
-        (void)fd;
-
-        if (!cmd->exe || strlen(cmd->exe) == 0) {
-            fprintf(stderr, "Error: empty command\n");
-            return;
-        }
-
-        char *exec_args[cmd->arg_count + 2];
-        exec_args[0] = cmd->exe;
-        for (uint32_t i = 0; i < cmd->arg_count; i++) {
-            exec_args[i + 1] = cmd->args[i];
-        }
-        exec_args[cmd->arg_count + 1] = NULL;
-
-        if (execvp(exec_args[0], exec_args) == -1) {
-            perror("execvp");
-            exit(EXIT_FAILURE);
-        }
-        usleep(100000);
-        return;
-    }
-
-    int fd;
-    (void)fd;
 
     if (!cmd->exe || strlen(cmd->exe) == 0) {
         fprintf(stderr, "Error: empty command\n");
@@ -89,21 +64,6 @@ static void execute_pipeline(const struct command_line *line) {
 
     pid_t pipeline_pids[1024];
     size_t pipeline_count = 0;
-
-    bool is_reading_fifo = false;
-    for (const struct expr *e = line->head; e; e = e->next) {
-        if (e->type == EXPR_TYPE_COMMAND && strcmp(e->cmd.exe, "cat") == 0) {
-            is_reading_fifo = true;
-            break;
-        }
-    }
-
-    if (is_reading_fifo && bg_initialized) {
-        int last_bg_code = pid_array_wait_and_free(&bg_children);
-        if (last_bg_code)
-            shell_last_exit_status = last_bg_code;
-        bg_initialized = false;
-    }
 
     for (const struct expr *e = line->head; e; e = e->next) {
         if (prev_type == EXPR_TYPE_AND && last_status != 0) {
@@ -310,6 +270,13 @@ int main(void) {
             }
 
             command_line_delete(line);
+        }
+        
+        if (bg_initialized) {
+            pid_array_wait_nonblock(&bg_children);
+        }
+        
+        while (waitpid(-1, NULL, WNOHANG) > 0) {
         }
     }
 
